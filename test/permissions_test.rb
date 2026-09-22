@@ -424,4 +424,65 @@ class PermissionsTest < Minitest::Test
 
     assert_equal 1, gate.pending_approvals.size
   end
+
+  def test_approval_entry_supports_tool_call_compatibility
+    gate = build_gate
+    call = tool_call(id: 'tc-1', name: 'bash', arguments: { 'command' => 'ls' })
+    gate.before_tool_call(call, {})
+    entry = gate.pending_approvals.first
+
+    assert_same call, entry[:tool_call]
+    assert_same call, entry['tool_call']
+    assert_equal 'tc-1', entry[:tool_call].id
+    assert_equal 'bash', entry[:tool_call].name
+    assert_equal({ 'command' => 'ls' }, entry[:tool_call].arguments)
+  end
+
+  def test_approval_entry_tool_call_reflects_the_recorded_call
+    gate = build_gate
+    first = tool_call(id: 'tc-1', name: 'write', arguments: { 'path' => 'a.txt' })
+    second = tool_call(id: 'tc-2', name: 'edit', arguments: { 'path' => 'b.txt' })
+    gate.before_tool_call(first, {})
+    gate.before_tool_call(second, {})
+
+    entries = gate.pending_approvals.to_h { |entry| [entry.tool_call_id, entry] }
+
+    assert_same first, entries['tc-1'][:tool_call]
+    assert_same second, entries['tc-2'][:tool_call]
+    assert_equal 'a.txt', entries['tc-1'][:tool_call].arguments['path']
+  end
+
+  def test_private_approved_predicate_uses_existing_approval_state
+    gate = build_gate
+    call = tool_call(id: 'tc-1', name: 'bash')
+    other = tool_call(id: 'tc-2', name: 'bash')
+
+    refute gate.send(:approved?, other)
+    refute gate.send(:approved?, call)
+
+    gate.before_tool_call(call, {})
+
+    refute gate.send(:approved?, call)
+
+    assert_same true, gate.approve('tc-1')
+
+    assert gate.send(:approved?, call)
+    refute gate.send(:approved?, other)
+  end
+
+  def test_private_approved_predicate_is_false_for_expired_and_unblocked_calls
+    gate = build_gate(timeout: 60)
+    call = tool_call(id: 'tc-1', name: 'bash')
+    unblocked = tool_call(id: 'r-1', name: 'read_file')
+
+    gate.before_tool_call(call, {})
+    gate.approve('tc-1')
+
+    assert gate.send(:approved?, call)
+    refute gate.send(:approved?, unblocked)
+
+    @now += 61
+
+    refute gate.send(:approved?, call)
+  end
 end

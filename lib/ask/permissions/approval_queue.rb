@@ -86,11 +86,11 @@ module Ask
       end
 
       def approve(*ids)
-        resolve_all(ids, @on_approve, :approved)
+        resolve_all(ids) { |action| apply(action) }
       end
 
       def reject(*ids)
-        resolve_all(ids, @on_reject, :rejected)
+        resolve_all(ids) { |action| reject_action(action) }
       end
 
       def approve_all
@@ -107,7 +107,7 @@ module Ask
         begin
           while (head = next_auto_head)
             begin
-              resolve(head.id, @on_approve, :approved)
+              apply(head)
             rescue UnknownApprovalError
               next
             end
@@ -121,7 +121,15 @@ module Ask
 
       private
 
-      def resolve_all(ids, callback, status)
+      def apply(action)
+        resolve(action.id, @on_approve, :approved)
+      end
+
+      def reject_action(action)
+        resolve(action.id, @on_reject, :rejected)
+      end
+
+      def resolve_all(ids)
         actions = @mutex.synchronize do
           ids.flatten.uniq
              .filter_map { |id| @actions[id] }
@@ -130,7 +138,7 @@ module Ask
         end
 
         actions.filter_map do |action|
-          resolve(action.id, callback, status)
+          yield action
         rescue UnknownApprovalError
           nil
         end

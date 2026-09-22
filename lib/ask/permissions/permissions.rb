@@ -16,7 +16,8 @@ module Ask
       MODE_BLOCKED_TOOLS = ACCESS_MODES.transform_values { |config| config[:blocked_tools] }.freeze
 
       Approval = Data.define(
-        :tool_call_id, :tool_name, :arguments, :reason, :status, :created_at, :approved_at
+        :tool_call_id, :tool_name, :arguments, :reason, :status,
+        :created_at, :approved_at, :tool_call
       ) do
         def pending?
           status == :pending
@@ -24,6 +25,10 @@ module Ask
 
         def approved?
           status == :approved
+        end
+
+        def [](key)
+          to_h.fetch(key.to_sym)
         end
       end
 
@@ -82,6 +87,12 @@ module Ask
 
       private
 
+      def approved?(tool_call)
+        @mutex.synchronize do
+          existing_decision(tool_call.id)&.dig(:action) == :proceed
+        end
+      end
+
       def mode_tools(mode)
         config = ACCESS_MODES.fetch(mode) do
           raise ArgumentError,
@@ -124,7 +135,8 @@ module Ask
           reason: reason_for(name),
           status: :pending,
           created_at: @clock.call,
-          approved_at: nil
+          approved_at: nil,
+          tool_call: tool_call
         )
         @approvals[tool_call.id] = entry
         { action: :block, reason: entry.reason }

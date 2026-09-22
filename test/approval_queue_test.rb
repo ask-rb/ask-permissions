@@ -3,6 +3,30 @@
 require_relative 'test_helper'
 
 class ApprovalQueueTest < Minitest::Test
+  class HookedQueue < Ask::Permissions::ApprovalQueue
+    attr_reader :applied, :rejected_actions
+
+    def initialize(**options)
+      super
+      @applied = []
+      @rejected_actions = []
+    end
+
+    private
+
+    def apply(action)
+      resolved = super
+      @applied << resolved
+      resolved
+    end
+
+    def reject_action(action)
+      resolved = super
+      @rejected_actions << resolved
+      resolved
+    end
+  end
+
   def setup
     @approved = []
     @rejected = []
@@ -437,5 +461,103 @@ class ApprovalQueueTest < Minitest::Test
     assert_equal 200, ids.size
     assert_equal 200, ids.uniq.size
     assert_equal (1..200).to_a, ids.sort
+  end
+
+  def test_hooks_are_private_extension_points
+    hooked = HookedQueue.new
+    plain = build_queue
+
+    assert_respond_to hooked, :apply, include_all: true
+    assert_respond_to hooked, :reject_action, include_all: true
+    refute_respond_to hooked, :apply
+    refute_respond_to hooked, :reject_action
+    assert_respond_to plain, :apply, include_all: true
+    assert_respond_to plain, :reject_action, include_all: true
+    refute_respond_to plain, :apply
+    refute_respond_to plain, :reject_action
+  end
+
+  def test_manual_approve_routes_through_apply_and_returns_resolved_action
+    queue = HookedQueue.new(on_approve: ->(action) { @approved << action })
+    id = queue.submit(tool_call_id: 'tc-1', tool_name: 'bash')
+
+    resolved = queue.approve(id)
+
+    assert_equal [id], resolved.map(&:id)
+    assert_equal :approved, resolved.first.status
+    assert_equal resolved.first, queue.applied.first
+    assert_predicate queue.applied.first, :approved?
+    assert_empty queue.rejected_actions
+    assert_equal [id], @approved.map(&:id)
+    assert_equal :approved, queue[id].status
+  end
+
+  def test_manual_reject_routes_through_reject_action_and_returns_resolved_action
+    queue = HookedQueue.new(on_reject: ->(action) { @rejected << action })
+    id = queue.submit(tool_call_id: 'tc-1', tool_name: 'bash')
+
+    resolved = queue.reject(id)
+
+    assert_equal [id], resolved.map(&:id)
+    assert_equal :rejected, resolved.first.status
+    assert_equal resolved.first, queue.rejected_actions.first
+    assert_predicate queue.rejected_actions.first, :rejected?
+    assert_empty queue.applied
+    assert_equal [id], @rejected.map(&:id)
+    assert_equal :rejected, queue[id].status
+  end
+
+  def test_auto_drain_routes_through_apply
+    queue = HookedQueue.new(auto_approve: { 'read' => true }, on_approve: ->(action) { @approved << action })
+    id = queue.submit(tool_call_id: 'tc-1', tool_name: 'read', auto_approvable: true)
+
+    assert_equal :approved, queue[id].status
+    assert_equal 1, queue.applied.size
+    assert_equal id, queue.applied.first.id
+    assert_predicate queue.applied.first, :approved?
+    assert_empty queue.rejected_actions
+    assert_equal [id], @approved.map(&:id)
+  end
+
+  def test_explicit_drain_routes_through_apply
+    queue = HookedQueue.new(auto_approve: { 'auto' => true })
+    gate = queue.submit(tool_call_id: '1', tool_name: 'gate')
+    auto = queue.submit(tool_call_id: '2', tool_name: 'auto', auto_approvable: true)
+
+    assert_empty queue.applied
+
+    queue.approve(gate)
+    queue.drain
+
+    assert_equal [gate, auto], queue.applied.map(&:id)
+    assert_equal :approved, queue[auto].status
+  end
+
+  def test_hook_super_failure_rolls_back_to_pending_and_reraises
+    boom = Class.new(StandardError)
+    queue = HookedQueue.new(on_approve: ->(_action) { raise boom, 'approve failed' })
+    id = queue.submit(tool_call_id: '1', tool_name: 'bash')
+
+    assert_raises(boom) { queue.approve(id) }
+
+    assert_equal :pending, queue[id].status
+    assert_empty queue.applied
+    assert_equal [id], queue.pending_actions.map(&:id)
+  end
+
+  def test_hooks_observe_resolved_action_returned_by_super
+    observations = []
+    subclass = Class.new(HookedQueue) do
+      define_method(:apply) do |action|
+        super(action).tap { |resolved| observations << [action.id, resolved.status, resolved.equal?(action)] }
+      end
+    end
+    queue = subclass.new
+    id = queue.submit(tool_call_id: 'tc-1', tool_name: 'bash')
+
+    returned = queue.approve(id)
+
+    assert_equal [[id, :approved, false]], observations
+    assert_equal returned.first, queue[id]
   end
 end
