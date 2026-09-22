@@ -43,7 +43,7 @@ class ApprovalQueueTest < Minitest::Test
     assert_equal 'tc-1', action.tool_call_id
     assert_equal 'bash', action.tool_name
     assert_equal({ 'command' => 'ls' }, action.args)
-    assert_equal false, action.auto_approvable
+    refute(action.auto_approvable)
     assert_equal :pending, action.status
     assert_instance_of Time, action.submitted_at
     assert_equal 'needs eyes', action.message
@@ -61,7 +61,7 @@ class ApprovalQueueTest < Minitest::Test
 
     assert_equal({}, action.args)
     assert_nil action.message
-    assert_equal false, action.auto_approvable
+    refute(action.auto_approvable)
   end
 
   def test_pending_query_methods
@@ -159,7 +159,7 @@ class ApprovalQueueTest < Minitest::Test
     assert_empty @approved
   end
 
-  def test_drain_resumes_after_gate_is_approved
+  def test_manual_approve_does_not_drain_following_auto_actions
     queue = build_queue(auto_approve: { 'gate' => true, 'auto' => true })
     gate = queue.submit(tool_call_id: '1', tool_name: 'gate')
     auto = queue.submit(tool_call_id: '2', tool_name: 'auto', auto_approvable: true)
@@ -168,13 +168,19 @@ class ApprovalQueueTest < Minitest::Test
 
     assert_equal [gate], resolved.map(&:id)
     assert_equal :approved, resolved.first.status
+    assert_equal :pending, queue[auto].status
+    assert_equal [auto], queue.pending_actions.map(&:id)
+    assert_equal [gate], @approved.map(&:id)
+
+    queue.drain
+
     assert_equal :approved, queue[auto].status
     assert_empty queue.pending_actions
     refute_predicate queue, :any_pending?
     assert_equal [gate, auto], @approved.map(&:id)
   end
 
-  def test_drain_resumes_after_gate_is_rejected
+  def test_manual_reject_does_not_drain_following_auto_actions
     queue = build_queue(auto_approve: { 'gate' => true, 'auto' => true })
     gate = queue.submit(tool_call_id: '1', tool_name: 'gate')
     auto = queue.submit(tool_call_id: '2', tool_name: 'auto', auto_approvable: true)
@@ -183,10 +189,33 @@ class ApprovalQueueTest < Minitest::Test
 
     assert_equal [gate], resolved.map(&:id)
     assert_equal :rejected, resolved.first.status
+    assert_equal :pending, queue[auto].status
+    assert_equal [auto], queue.pending_actions.map(&:id)
+    assert_equal [gate], @rejected.map(&:id)
+    assert_empty @approved
+
+    queue.drain
+
     assert_equal :approved, queue[auto].status
+    assert_empty queue.pending_actions
     assert_equal [gate], @rejected.map(&:id)
     assert_equal [auto], @approved.map(&:id)
-    assert_empty queue.pending_actions
+  end
+
+  def test_next_submit_drains_auto_actions_blocked_behind_manual_gate
+    queue = build_queue(auto_approve: { 'gate' => true, 'auto' => true })
+    gate = queue.submit(tool_call_id: '1', tool_name: 'gate')
+    auto = queue.submit(tool_call_id: '2', tool_name: 'auto', auto_approvable: true)
+
+    queue.approve(gate)
+
+    assert_equal :pending, queue[auto].status
+
+    manual = queue.submit(tool_call_id: '3', tool_name: 'manual')
+
+    assert_equal :approved, queue[auto].status
+    assert_equal [manual], queue.pending_actions.map(&:id)
+    assert_equal [gate, auto], @approved.map(&:id)
   end
 
   def test_approve_returns_array_of_actions
@@ -243,18 +272,79 @@ class ApprovalQueueTest < Minitest::Test
     assert_equal({}, build_queue.auto_approve)
   end
 
-  def test_unknown_and_resolved_ids_raise
+  def test_unknown_and_resolved_ids_are_ignored_without_exceptions
     queue = build_queue
 
-    assert_raises(Ask::Permissions::UnknownApprovalError) { queue.approve('nope') }
-    assert_raises(Ask::Permissions::UnknownApprovalError) { queue.reject('nope') }
+    assert_empty queue.approve('nope')
+    assert_empty queue.reject('nope')
+    assert_empty queue.approve(nil)
+    refute_predicate queue, :any_pending?
 
     id = queue.submit(tool_call_id: '1', tool_name: 'bash')
     queue.approve(id)
 
-    assert_raises(Ask::Permissions::UnknownApprovalError) { queue.approve(id) }
-    assert_raises(Ask::Permissions::UnknownApprovalError) { queue.reject(id) }
+    assert_empty queue.approve(id, 'nope')
+    assert_empty queue.reject(id)
     assert_equal :approved, queue[id].status
+  end
+
+  def test_approve_flattens_sorts_and_ignores_unknown_or_resolved_ids
+    queue = build_queue
+    id_one = queue.submit(tool_call_id: '1', tool_name: 'one')
+    id_two = queue.submit(tool_call_id: '2', tool_name: 'two')
+    id_three = queue.submit(tool_call_id: '3', tool_name: 'three')
+    queue.approve(id_two)
+
+    resolved = queue.approve([id_three, [id_one]], id_two, 'nope')
+
+    assert_equal [id_one, id_three], resolved.map(&:id)
+    assert(resolved.all? { |action| action.status == :approved })
+    assert_empty queue.pending_actions
+    assert_equal [id_two, id_one, id_three], @approved.map(&:id)
+  end
+
+  def test_reject_flattens_sorts_and_ignores_unknown_or_resolved_ids
+    queue = build_queue
+    id_one = queue.submit(tool_call_id: '1', tool_name: 'first')
+    id_two = queue.submit(tool_call_id: '2', tool_name: 'second')
+    resolved_earlier = queue.submit(tool_call_id: '3', tool_name: 'other')
+    queue.approve(resolved_earlier)
+
+    resolved = queue.reject([[id_two]], id_one, resolved_earlier, 'nope')
+
+    assert_equal [id_one, id_two], resolved.map(&:id)
+    assert(resolved.all? { |action| action.status == :rejected })
+    assert_empty queue.pending_actions
+    assert_equal :approved, queue[resolved_earlier].status
+  end
+
+  def test_callback_attr_accessors_are_readable_and_assignable
+    queue = build_queue
+
+    assert_instance_of Proc, queue.on_submit
+    assert_instance_of Proc, queue.on_approve
+    assert_instance_of Proc, queue.on_reject
+
+    events = []
+    queue.on_submit = ->(action) { events << [:submit, action.tool_name] }
+    queue.on_approve = ->(action) { events << [:approve, action.tool_name] }
+    queue.on_reject = ->(action) { events << [:reject, action.tool_name] }
+
+    approved_id = queue.submit(tool_call_id: '1', tool_name: 'bash')
+    queue.approve(approved_id)
+    rejected_id = queue.submit(tool_call_id: '2', tool_name: 'read')
+    queue.reject(rejected_id)
+
+    assert_equal [
+      [:submit, 'bash'],
+      [:approve, 'bash'],
+      [:submit, 'read'],
+      [:reject, 'read']
+    ], events
+    assert_equal 1, queue.on_submit.arity
+    assert_empty @submitted
+    assert_empty @approved
+    assert_empty @rejected
   end
 
   def test_approve_callback_failure_resets_pending_and_reraises

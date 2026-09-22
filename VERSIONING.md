@@ -1,12 +1,13 @@
 # Versioning — ask-permissions
 
-This repository follows the ask-rb (Ask gem) versioning convention.
+This repository follows the ask-rb (Ask gem) versioning convention: exact sequential steps, never skipped numbers.
 
 ## Increment rules
 
-- Every release advances the version by exactly one step — no skipped numbers (`0.1.0 → 0.2.0`, `0.2.0 → 0.2.1`).
-- While pre-1.0 (`0.x`): an incompatible API or behavior change bumps the **minor** digit (`0.1.x → 0.2.0`).
-- Compatible fixes bump the **patch** digit only (`0.2.0 → 0.2.1`).
+- Every release advances the version by **exactly one step**. Never skip a number.
+- While pre-1.0 (`0.x`), an incompatible feature (API or behavior change) increments the **minor** digit by one: `0.1.0 -> 0.2.0`.
+- Compatible fixes increment the **patch** digit by one: `0.1.0 -> 0.1.1`, `0.2.0 -> 0.2.1`.
+- Skipping is never allowed: `0.1.0 -> 0.3.0` or `0.1.0 -> 0.1.2` from a single release are both violations.
 - The version source of truth is `lib/ask/permissions/version.rb`; the gemspec reads it from there.
 
 ## Changelog

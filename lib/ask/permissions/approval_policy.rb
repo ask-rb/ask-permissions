@@ -2,6 +2,7 @@
 
 module Ask
   module Permissions
+    # Hook adapter that consults rules, require_approval, and tool metadata, then enqueues through a queue.
     class ApprovalPolicy
       attr_reader :queue, :require_approval, :rules, :tools
 
@@ -10,9 +11,6 @@ module Ask
         @require_approval = require_approval
         @rules = rules
         @tools = tools
-        @next_action_id = 0
-        @action_index = {}
-        @mutex = Mutex.new
       end
 
       def before_tool_call(tool_call, _context = nil)
@@ -21,7 +19,7 @@ module Ask
 
         case rules&.classify(name, args)
         when :deny
-          return { action: :block, reason: "permission rules denied #{name.inspect}" }
+          return { action: :block, reason: "Denied by permission rules: '#{name}'" }
         when :allow
           return { action: :proceed }
         when :ask
@@ -34,7 +32,7 @@ module Ask
       end
 
       def lookup(action_id)
-        @mutex.synchronize { @action_index[action_id] }
+        queue[action_id]
       end
 
       private
@@ -72,21 +70,16 @@ module Ask
 
       def enqueue(tool_call, auto_approvable:)
         name = tool_call.name.to_s
-        reason = "approval required for #{name.inspect}"
+        reason = "Tool '#{name}' requires approval"
+        message = "Calling \"#{name}\" requires approval"
 
-        action = queue.submit(
+        action_id = queue.submit(
           tool_name: name,
           args: tool_call.arguments,
           tool_call_id: tool_call.id,
           auto_approvable: auto_approvable,
-          message: reason
+          message: message
         )
-
-        action_id = @mutex.synchronize do
-          @next_action_id += 1
-          @action_index[@next_action_id] = action
-          @next_action_id
-        end
 
         { action: :pending, action_id: action_id, reason: reason }
       end

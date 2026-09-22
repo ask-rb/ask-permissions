@@ -22,13 +22,14 @@ class ApprovalPolicyTest < Minitest::Test
 
     def initialize
       @submissions = []
+      @actions = {}
       @sequence = 0
     end
 
     def submit(tool_name:, args: nil, tool_call_id: nil, auto_approvable: false, message: nil)
       @sequence += 1
       action = FakeAction.new(
-        id: "queue-action-#{@sequence}",
+        id: @sequence,
         tool_name: tool_name,
         args: args,
         tool_call_id: tool_call_id,
@@ -37,7 +38,12 @@ class ApprovalPolicyTest < Minitest::Test
         status: :pending
       )
       @submissions << action
-      action
+      @actions[action.id] = action
+      action.id
+    end
+
+    def [](id)
+      @actions[id]
     end
   end
 
@@ -60,8 +66,8 @@ class ApprovalPolicyTest < Minitest::Test
     @queue = FakeQueue.new
   end
 
-  def build_policy(**options)
-    Ask::Permissions::ApprovalPolicy.new(queue: @queue, **options)
+  def build_policy(**)
+    Ask::Permissions::ApprovalPolicy.new(queue: @queue, **)
   end
 
   def tool_call(id: 'tc-1', name: 'bash', arguments: nil)
@@ -86,9 +92,19 @@ class ApprovalPolicyTest < Minitest::Test
     assert_equal %i[action reason], result.keys
     assert_equal :block, result[:action]
     assert_kind_of String, result[:reason]
-    assert_includes result[:reason], 'delete_user'
+    assert_equal "Denied by permission rules: 'delete_user'", result[:reason]
     assert_equal [['delete_user', { 'id' => 1 }]], rules.calls
     assert_empty @queue.submissions
+  end
+
+  def test_deny_reason_embeds_the_matched_tool_name_exactly_once
+    rules = FakeRules.new({ 'delete_user' => :deny })
+    policy = build_policy(rules: rules)
+
+    result = policy.before_tool_call(tool_call(name: 'delete_user'), {})
+
+    assert_equal "Denied by permission rules: 'delete_user'", result[:reason]
+    refute_includes result[:reason], '"'
   end
 
   def test_allow_rule_proceeds_even_when_approval_is_required
@@ -114,7 +130,7 @@ class ApprovalPolicyTest < Minitest::Test
     assert_equal %i[action action_id reason], result.keys
     assert_equal :pending, result[:action]
     assert_kind_of Integer, result[:action_id]
-    assert_kind_of String, result[:reason]
+    assert_equal "Tool 'bash' requires approval", result[:reason]
     assert_equal 1, @queue.submissions.size
 
     submission = @queue.submissions.first
@@ -123,7 +139,7 @@ class ApprovalPolicyTest < Minitest::Test
     assert_equal({ 'command' => 'rm -rf /' }, submission.args)
     assert_equal 'tc-1', submission.tool_call_id
     refute_predicate submission, :auto_approvable?
-    assert_equal result[:reason], submission.message
+    assert_equal 'Calling "bash" requires approval', submission.message
     assert_predicate submission, :pending?
   end
 
@@ -228,13 +244,32 @@ class ApprovalPolicyTest < Minitest::Test
     assert_equal 2, second[:action_id]
   end
 
+  def test_action_id_is_exactly_the_queue_submit_return_value
+    policy = build_policy(require_approval: :all)
+
+    result = policy.before_tool_call(tool_call(id: 'tc-1', name: 'bash'), {})
+
+    assert_equal @queue.submissions.first.id, result[:action_id]
+  end
+
+  def test_policies_sharing_a_queue_have_no_own_id_counter
+    first = Ask::Permissions::ApprovalPolicy.new(queue: @queue, require_approval: :all)
+    second = Ask::Permissions::ApprovalPolicy.new(queue: @queue, require_approval: :all)
+
+    a = first.before_tool_call(tool_call(id: 'a', name: 'one'), {})
+    b = second.before_tool_call(tool_call(id: 'b', name: 'two'), {})
+
+    assert_equal 1, a[:action_id]
+    assert_equal 2, b[:action_id]
+  end
+
   def test_lookup_maps_action_id_to_the_queue_action
     policy = build_policy(require_approval: 'bash')
 
     result = policy.before_tool_call(tool_call(id: 'tc-7', name: 'bash'), {})
     action = policy.lookup(result[:action_id])
 
-    assert_equal @queue.submissions.first, action
+    assert_same @queue.submissions.first, action
     assert_equal 'tc-7', action.tool_call_id
     assert_nil policy.lookup(9_999)
   end

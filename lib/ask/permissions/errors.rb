@@ -2,8 +2,10 @@
 
 module Ask
   module Permissions
-    Error = Class.new(StandardError)
+    class Error < StandardError
+    end
 
-    UnknownApprovalError = Class.new(Error)
+    class UnknownApprovalError < Error
+    end
   end
 end

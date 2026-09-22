@@ -2,6 +2,7 @@
 
 module Ask
   module Permissions
+    # Matches declared rule patterns against tool names.
     module ToolPattern
       module_function
 

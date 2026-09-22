@@ -1,9 +1,9 @@
 # frozen_string_literal: true
 
-$LOAD_PATH.unshift File.expand_path("../lib", __dir__)
+$LOAD_PATH.unshift File.expand_path('../lib', __dir__)
 
-require "ask-permissions"
-require "minitest/autorun"
+require 'ask-permissions'
+require 'minitest/autorun'
 
 module PermissionTestHelpers
   FakeTool = Struct.new(:name, :approval_required, :auto_approvable, keyword_init: true) do

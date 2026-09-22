@@ -2,17 +2,21 @@
 
 module Ask
   module Permissions
+    # Mode gate that blocks change tools until approved, with sticky approvals per tool_call_id.
     class Permissions
-      DEFAULT_MODE = :ask_before_changes
-      DEFAULT_BLOCKED_TOOLS = %w[write edit bash destroy].freeze
-      MODE_BLOCKED_TOOLS = {
-        full_access: [].freeze,
-        ask_before_changes: DEFAULT_BLOCKED_TOOLS,
-        read_only: DEFAULT_BLOCKED_TOOLS
+      DEFAULT_TOOLS = %i[write edit bash destroy].freeze
+
+      ACCESS_MODES = {
+        full_access: { blocked_tools: [].freeze }.freeze,
+        ask_before_changes: { blocked_tools: DEFAULT_TOOLS }.freeze,
+        read_only: { blocked_tools: DEFAULT_TOOLS }.freeze
       }.freeze
 
+      DEFAULT_BLOCKED_TOOLS = DEFAULT_TOOLS
+      MODE_BLOCKED_TOOLS = ACCESS_MODES.transform_values { |config| config[:blocked_tools] }.freeze
+
       Approval = Data.define(
-        :tool_call_id, :tool_name, :arguments, :reason, :status, :submitted_at, :approved_at
+        :tool_call_id, :tool_name, :arguments, :reason, :status, :created_at, :approved_at
       ) do
         def pending?
           status == :pending
@@ -26,12 +30,15 @@ module Ask
       attr_reader :mode, :blocked_tools, :timeout
 
       def initialize(mode: nil, blocked_tools: nil, timeout: nil, clock: nil)
-        @mode = mode.nil? ? DEFAULT_MODE : mode
-        unless MODE_BLOCKED_TOOLS.key?(@mode)
-          raise ArgumentError, "unknown mode: #{mode.inspect} (valid modes: #{MODE_BLOCKED_TOOLS.keys.join(', ')})"
-        end
-
-        @blocked_tools = (MODE_BLOCKED_TOOLS.fetch(@mode) + Array(blocked_tools).map(&:to_s)).uniq
+        @mode = mode
+        @blocked_tools =
+          if mode
+            mode_tools(mode)
+          elsif blocked_tools
+            Array(blocked_tools).map { |name| name.to_s.to_sym }.uniq
+          else
+            DEFAULT_BLOCKED_TOOLS.dup
+          end
         @timeout = timeout
         @clock = clock || -> { Time.now }
         @approvals = {}
@@ -39,46 +46,33 @@ module Ask
       end
 
       def before_tool_call(tool_call, _context = nil)
-        name = tool_call.name.to_s
+        name = tool_call.name.to_s.to_sym
         return { action: :proceed } unless blocked_tools.include?(name)
 
         id = tool_call.id
+        created = false
 
-        @mutex.synchronize do
-          entry = @approvals[id]
-
-          if entry&.approved?
-            return { action: :proceed } unless expired?(entry)
-
-            entry = entry.with(status: :pending, submitted_at: @clock.call, approved_at: nil)
-            @approvals[id] = entry
-          elsif entry
-            return { action: :block, reason: entry.reason }
+        result = @mutex.synchronize do
+          decision = existing_decision(id)
+          if decision
+            decision
           else
-            entry = Approval.new(
-              tool_call_id: id,
-              tool_name: name,
-              arguments: tool_call.arguments,
-              reason: reason_for(name),
-              status: :pending,
-              submitted_at: @clock.call,
-              approved_at: nil
-            )
-            @approvals[id] = entry
+            created = true
+            record_pending(tool_call, name)
           end
-
-          { action: :block, reason: entry.reason }
         end
+
+        warn_approval(tool_call) if created
+        result
       end
 
       def approve(tool_call_id)
         @mutex.synchronize do
           entry = @approvals[tool_call_id]
-          raise UnknownApprovalError, "unknown pending approval: #{tool_call_id.inspect}" unless entry&.pending?
+          next false unless entry
 
-          approved = entry.with(status: :approved, approved_at: @clock.call)
-          @approvals[tool_call_id] = approved
-          approved
+          @approvals[tool_call_id] = entry.with(status: :approved, approved_at: @clock.call)
+          true
         end
       end
 
@@ -88,14 +82,57 @@ module Ask
 
       private
 
+      def mode_tools(mode)
+        config = ACCESS_MODES.fetch(mode) do
+          raise ArgumentError,
+                "Unknown access mode: #{mode.inspect}. Valid: #{ACCESS_MODES.keys.join(', ')}"
+        end
+        config[:blocked_tools].dup
+      end
+
       def reason_for(tool_name)
+        return "#{tool_name} requires approval" if mode.nil?
+
         "#{tool_name} requires approval (mode: #{mode})"
       end
 
       def expired?(entry)
-        return false if timeout.nil? || entry.approved_at.nil?
+        return false if timeout.nil?
 
-        (@clock.call - entry.approved_at) >= timeout
+        (@clock.call - entry.created_at) > timeout
+      end
+
+      def existing_decision(id)
+        entry = @approvals[id]
+
+        if entry && expired?(entry)
+          @approvals.delete(id)
+          entry = nil
+        end
+
+        return nil unless entry
+        return { action: :proceed } if entry.approved?
+
+        { action: :block, reason: entry.reason }
+      end
+
+      def record_pending(tool_call, name)
+        entry = Approval.new(
+          tool_call_id: tool_call.id,
+          tool_name: name,
+          arguments: tool_call.arguments,
+          reason: reason_for(name),
+          status: :pending,
+          created_at: @clock.call,
+          approved_at: nil
+        )
+        @approvals[tool_call.id] = entry
+        { action: :block, reason: entry.reason }
+      end
+
+      def warn_approval(tool_call)
+        warn "[Permissions] Tool '#{tool_call.name}' requires approval. " \
+             "Call approve('#{tool_call.id}') to allow."
       end
     end
   end

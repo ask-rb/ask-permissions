@@ -4,6 +4,7 @@ require_relative 'errors'
 
 module Ask
   module Permissions
+    # Stores pending approval actions, auto-approves eligible work in order, and fires one-argument callbacks.
     class ApprovalQueue
       Action = Data.define(
         :id, :tool_call_id, :tool_name, :args, :auto_approvable, :status, :submitted_at, :message
@@ -30,6 +31,7 @@ module Ask
       end
 
       attr_reader :auto_approve
+      attr_accessor :on_approve, :on_reject, :on_submit
 
       def initialize(on_approve: nil, on_reject: nil, auto_approve: {}, on_submit: nil, clock: nil)
         @on_approve = on_approve
@@ -120,9 +122,18 @@ module Ask
       private
 
       def resolve_all(ids, callback, status)
-        resolved = ids.flatten.map { |id| resolve(id, callback, status) }
-        drain
-        resolved
+        actions = @mutex.synchronize do
+          ids.flatten.uniq
+             .filter_map { |id| @actions[id] }
+             .select(&:pending?)
+             .sort_by(&:id)
+        end
+
+        actions.filter_map do |action|
+          resolve(action.id, callback, status)
+        rescue UnknownApprovalError
+          nil
+        end
       end
 
       def resolve(id, callback, status)
