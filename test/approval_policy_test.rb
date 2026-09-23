@@ -117,6 +117,18 @@ class ApprovalPolicyTest < Minitest::Test
     assert_empty @queue.submissions
   end
 
+  def test_allow_rule_cannot_bypass_tool_that_always_requires_human_approval
+    rules = FakeRules.new({ 'bash' => :allow })
+    tool = fake_tool('bash', auto_approvable: true)
+    tool.define_singleton_method(:always_ask?) { true }
+    policy = build_policy(rules: rules, tools: { 'bash' => tool })
+
+    result = policy.before_tool_call(tool_call(name: 'bash'), {})
+
+    assert_equal :pending, result[:action]
+    refute @queue.submissions.first.auto_approvable?
+  end
+
   def test_ask_rule_queues_with_auto_approvable_false
     rules = FakeRules.new({ 'bash' => :ask })
     tools = { 'bash' => fake_tool('bash', auto_approvable: true) }

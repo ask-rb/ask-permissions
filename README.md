@@ -12,6 +12,11 @@ Everything lives under the `Ask::Permissions` namespace:
 | `ApprovalPolicy` | Hook adapter: consults rules, `require_approval`, and tool metadata, then enqueues through a queue. |
 | `ApprovalQueue` | Stores pending `Action`s, auto-approves eligible work in order, fires one-argument callbacks. |
 | `Permissions` | Optional mode gate (`nil` by default, or `:ask_before_changes` / `:read_only` / `:full_access`) with sticky approvals per `tool_call_id`. |
+| `PlanModePolicy` | Allows only declared read-only tools and the plan-submission tool while plan mode is active. |
+
+Tools that expose `always_ask?` cannot be approved by a matching ordinary
+`allow` rule; their calls enter the human approval queue and cannot be
+auto-approved.
 
 ## Installation
 

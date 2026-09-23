@@ -17,14 +17,21 @@ module Ask
         name = tool_call.name.to_s
         args = tool_call.arguments
 
-        case rules&.classify(name, args)
+        rule_decision = rules&.classify(name, args)
+        case rule_decision
         when :deny
           return { action: :block, reason: "Denied by permission rules: '#{name}'" }
-        when :allow
-          return { action: :proceed }
         when :ask
           return enqueue(tool_call, auto_approvable: false)
         end
+
+        # A tool's explicit human-confirmation requirement is a hard safety
+        # boundary: an ordinary allow rule must not be able to bypass it.
+        if always_ask?(name)
+          return enqueue(tool_call, auto_approvable: false)
+        end
+
+        return { action: :proceed } if rule_decision == :allow
 
         return { action: :proceed } unless approval_required?(name)
 
@@ -57,6 +64,11 @@ module Ask
       def auto_approvable?(name)
         tool = find_tool(name)
         !!(tool && tool.respond_to?(:auto_approvable?) && tool.auto_approvable?)
+      end
+
+      def always_ask?(name)
+        tool = find_tool(name)
+        !!(tool && tool.respond_to?(:always_ask?) && tool.always_ask?)
       end
 
       def find_tool(name)
