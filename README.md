@@ -204,6 +204,14 @@ policy = Ask::Permissions::ApprovalPolicy.new(
 )
 ```
 
+The optional `mode:` applies declared tool capabilities consistently: `:read_only`
+blocks side-effecting or undeclared-scope tools, `:ask_before_changes` queues
+them for a person, and `:full_access` bypasses ordinary risk gates. Explicit
+`ask`/`deny` rules still apply in every mode, and a tool's `always_ask?` remains
+non-bypassable. Tools with `:high` or `:critical` risk are queued unless an
+explicit allow rule or `:full_access` mode permits them; risk-gated approvals
+are never auto-approved.
+
 ### The hook: `before_tool_call`
 
 `before_tool_call(tool_call, context = nil)` expects `tool_call` to respond to `name`, `arguments`, and `id`. It returns exactly one of three shapes:

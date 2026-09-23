@@ -17,6 +17,11 @@ class ApprovalPolicyTest < Minitest::Test
     end
   end
 
+  CapabilityTool = Struct.new(:name, :always_ask, :risk_level, :side_effect_scope, :auto_approvable, keyword_init: true) do
+    def always_ask? = always_ask
+    def auto_approvable? = auto_approvable
+  end
+
   class FakeQueue
     attr_reader :submissions
 
@@ -127,6 +132,54 @@ class ApprovalPolicyTest < Minitest::Test
 
     assert_equal :pending, result[:action]
     refute @queue.submissions.first.auto_approvable?
+  end
+
+  def test_high_risk_tool_queues_for_human_approval_and_cannot_auto_approve
+    tool = CapabilityTool.new(name: 'deploy', risk_level: :high, side_effect_scope: :external, auto_approvable: true)
+    policy = build_policy(tools: { 'deploy' => tool })
+
+    result = policy.before_tool_call(tool_call(name: 'deploy'), {})
+
+    assert_equal :pending, result[:action]
+    refute_predicate @queue.submissions.first, :auto_approvable?
+  end
+
+  def test_read_only_mode_blocks_unknown_or_mutating_capabilities
+    tool = CapabilityTool.new(name: 'opaque', side_effect_scope: :unknown)
+    policy = build_policy(mode: :read_only, tools: { 'opaque' => tool })
+
+    result = policy.before_tool_call(tool_call(name: 'opaque'), {})
+
+    assert_equal :block, result[:action]
+    assert_empty @queue.submissions
+  end
+
+  def test_ask_before_changes_mode_queues_declared_side_effects
+    tool = CapabilityTool.new(name: 'write_file', risk_level: :low, side_effect_scope: :workspace, auto_approvable: true)
+    policy = build_policy(mode: :ask_before_changes, tools: { 'write_file' => tool })
+
+    result = policy.before_tool_call(tool_call(name: 'write_file'), {})
+
+    assert_equal :pending, result[:action]
+    refute_predicate @queue.submissions.first, :auto_approvable?
+  end
+
+  def test_full_access_mode_bypasses_risk_gate_but_not_hard_human_gate
+    risky_tool = CapabilityTool.new(name: 'deploy', risk_level: :critical, side_effect_scope: :external)
+    risky_policy = build_policy(mode: :full_access, tools: { 'deploy' => risky_tool })
+    assert_equal({ action: :proceed }, risky_policy.before_tool_call(tool_call(name: 'deploy'), {}))
+
+    mandatory_tool = CapabilityTool.new(name: 'deploy', always_ask: true, risk_level: :critical,
+      side_effect_scope: :external)
+    mandatory_policy = build_policy(mode: :full_access, tools: { 'deploy' => mandatory_tool })
+    assert_equal :pending, mandatory_policy.before_tool_call(tool_call(name: 'deploy'), {})[:action]
+  end
+
+  def test_read_only_mode_allows_only_explicitly_declared_side_effect_free_tools
+    tool = CapabilityTool.new(name: 'read_config', side_effect_scope: :none)
+    policy = build_policy(mode: :read_only, tools: { 'read_config' => tool })
+
+    assert_equal({ action: :proceed }, policy.before_tool_call(tool_call(name: 'read_config'), {}))
   end
 
   def test_ask_rule_queues_with_auto_approvable_false
