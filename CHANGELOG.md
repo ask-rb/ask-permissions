@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Add `PermissionRuleSet` for composing default and project rules with
+  deny-first precedence, plus versioned JSON-safe snapshots for portable
+  host-owned rule storage.
+- Allow `ApprovalPolicy` to receive optional `project_rules:` while
+  preserving the existing `rules:` API.
+
 ## [0.2.0] - 2026-09-23
 
 ### Added

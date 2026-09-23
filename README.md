@@ -155,6 +155,31 @@ rules.allow "read_file", %r{/docs/}     # Regexp against the serialized args
 rules.allow "search"                    # any arguments
 ```
 
+### Project rule layers and snapshots
+
+Compose application defaults with host-selected project rules using
+`PermissionRuleSet`. A deny in either layer wins; otherwise a matching
+project decision overrides the default, and an unmatched project rule falls
+back to the default layer.
+
+```ruby
+defaults = Ask::Permissions::PermissionRules.new { deny :bash, /rm\s+-rf/ }
+project = Ask::Permissions::PermissionRules.new { allow :read_file }
+rules = Ask::Permissions::PermissionRuleSet.new(
+  default_rules: defaults,
+  project_rules: project
+)
+
+rules.classify(:bash, { command: "rm -rf /tmp" }) # => :deny
+rules.classify(:read_file)                        # => :allow
+```
+
+`PermissionRules#snapshot` and `PermissionRuleSet#snapshot` produce
+versioned, JSON-safe data restored with `.from_snapshot`. The gem does not
+persist rules or resolve project identity: the host must authorize and scope
+the storage itself. Pass a project's rules to `ApprovalPolicy` with
+`project_rules:` alongside default `rules:`.
+
 Introspection: `rules` and `dangerous_rules` (both in declaration order). Each entry is a `Rule` with `decision`, `declared_decision`, `effective_decision`, `tool_pattern`, `argument_pattern`, `dangerous`, plus the predicates `dangerous?` and `universal?` (unrestricted argument pattern — `argument_pattern` is `nil`, regardless of tool pattern) and the matchers `tool_matches?(name)`, `argument_matches?(args)`, and `matches?(name, args)`. `decision` and `declared_decision` always keep the decision as written at declaration time; `classify` returns `effective_decision`.
 
 ### Dangerous allow downgrade

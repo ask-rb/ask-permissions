@@ -7,19 +7,26 @@ module Ask
       MODES = %i[full_access ask_before_changes read_only].freeze
       SIDE_EFFECT_SCOPES = %i[none session workspace project system external unknown].freeze
 
-      attr_reader :queue, :require_approval, :rules, :tools, :mode, :session_grants, :project_grants
+      attr_reader :queue, :require_approval, :rules, :tools, :mode, :session_grants, :project_grants,
+        :project_rules
 
       def initialize(queue:, require_approval: nil, rules: nil, tools: nil, mode: nil, session_grants: nil,
-        project_grants: nil)
+        project_grants: nil, project_rules: nil)
         raise ArgumentError, "Unknown permission mode: #{mode.inspect}" if mode && !MODES.include?(mode.to_sym)
 
         @queue = queue
         @require_approval = require_approval
-        @rules = rules
         @tools = tools
         @mode = mode&.to_sym
         @session_grants = session_grants
         @project_grants = project_grants
+        @project_rules = project_rules
+
+        @rules = if project_rules
+                   PermissionRuleSet.new(default_rules: rules, project_rules: project_rules)
+                 else
+                   rules
+                 end
       end
 
       def before_tool_call(tool_call, _context = nil)
