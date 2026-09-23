@@ -6,8 +6,11 @@ module Ask
   module Permissions
     # Stores pending approval actions, auto-approves eligible work in order, and fires one-argument callbacks.
     class ApprovalQueue
+      RESOLUTION_SCOPES = %i[once session project].freeze
+
       Action = Data.define(
-        :id, :tool_call_id, :tool_name, :args, :auto_approvable, :status, :submitted_at, :message
+        :id, :tool_call_id, :tool_name, :args, :auto_approvable, :status, :submitted_at, :message,
+        :resolution_scope, :feedback
       ) do
         def auto_approvable?
           !!auto_approvable
@@ -27,6 +30,11 @@ module Ask
 
         def rejected?
           status == :rejected
+        end
+
+        # Alias for hosts that think in terms of approval scope.
+        def scope
+          resolution_scope
         end
       end
 
@@ -56,7 +64,9 @@ module Ask
             auto_approvable: auto_approvable ? true : false,
             status: :pending,
             submitted_at: @clock.call,
-            message: message
+            message: message,
+            resolution_scope: nil,
+            feedback: nil
           )
           @actions[created.id] = created
           created
@@ -119,7 +129,9 @@ module Ask
             auto_approvable: snapshot_value(entry, :auto_approvable) == true,
             status: :pending,
             submitted_at: @clock.call,
-            message: snapshot_value(entry, :message)
+            message: snapshot_value(entry, :message),
+            resolution_scope: nil,
+            feedback: nil
           )
         end
         ids = restored.map(&:id)
@@ -148,20 +160,21 @@ module Ask
         @mutex.synchronize { @actions[id] }
       end
 
-      def approve(*ids)
-        resolve_all(ids) { |action| apply(action) }
+      def approve(*ids, scope: :once)
+        validated = validate_resolution_scope!(scope)
+        resolve_all(ids) { |action| apply(action, scope: validated) }
       end
 
-      def reject(*ids)
-        resolve_all(ids) { |action| reject_action(action) }
+      def reject(*ids, feedback: nil)
+        resolve_all(ids) { |action| reject_action(action, feedback: feedback) }
       end
 
-      def approve_all
-        approve(*pending_actions.map(&:id))
+      def approve_all(scope: :once)
+        approve(*pending_actions.map(&:id), scope: scope)
       end
 
-      def reject_all
-        reject(*pending_actions.map(&:id))
+      def reject_all(feedback: nil)
+        reject(*pending_actions.map(&:id), feedback: feedback)
       end
 
       def drain
@@ -190,12 +203,13 @@ module Ask
         hash.key?(key) ? hash[key] : hash[key.to_s]
       end
 
-      def apply(action)
-        resolve(action.id, @on_approve, :approved)
+      def apply(action, scope: :once)
+        validated = validate_resolution_scope!(scope)
+        resolve(action.id, @on_approve, :approved, resolution_scope: validated)
       end
 
-      def reject_action(action)
-        resolve(action.id, @on_reject, :rejected)
+      def reject_action(action, feedback: nil)
+        resolve(action.id, @on_reject, :rejected, feedback: feedback)
       end
 
       def resolve_all(ids)
@@ -213,7 +227,16 @@ module Ask
         end
       end
 
-      def resolve(id, callback, status)
+      def validate_resolution_scope!(scope)
+        normalized = scope.respond_to?(:to_sym) ? scope.to_sym : scope
+        unless RESOLUTION_SCOPES.include?(normalized)
+          raise ArgumentError, "Unknown resolution scope: #{scope.inspect}. Valid: #{RESOLUTION_SCOPES.join(', ')}"
+        end
+
+        normalized
+      end
+
+      def resolve(id, callback, status, resolution_scope: nil, feedback: nil)
         previous = nil
         applying = nil
 
@@ -221,7 +244,7 @@ module Ask
           previous = @actions[id]
           raise UnknownApprovalError, "unknown pending approval: #{id.inspect}" unless previous&.pending?
 
-          applying = previous.with(status: :applying)
+          applying = previous.with(status: :applying, resolution_scope: resolution_scope, feedback: feedback)
           @actions[id] = applying
         end
 

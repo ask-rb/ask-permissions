@@ -14,13 +14,13 @@ class ApprovalQueueTest < Minitest::Test
 
     private
 
-    def apply(action)
+    def apply(action, scope: :once)
       resolved = super
       @applied << resolved
       resolved
     end
 
-    def reject_action(action)
+    def reject_action(action, feedback: nil)
       resolved = super
       @rejected_actions << resolved
       resolved
@@ -548,8 +548,8 @@ class ApprovalQueueTest < Minitest::Test
   def test_hooks_observe_resolved_action_returned_by_super
     observations = []
     subclass = Class.new(HookedQueue) do
-      define_method(:apply) do |action|
-        super(action).tap { |resolved| observations << [action.id, resolved.status, resolved.equal?(action)] }
+      define_method(:apply) do |action, scope: :once|
+        super(action, scope: scope).tap { |resolved| observations << [action.id, resolved.status, resolved.equal?(action)] }
       end
     end
     queue = subclass.new
@@ -598,5 +598,125 @@ class ApprovalQueueTest < Minitest::Test
     end
 
     assert_match(/version/i, error.message)
+  end
+
+  def test_approve_defaults_to_once_scope
+    queue = build_queue
+    id = queue.submit(tool_call_id: '1', tool_name: 'bash')
+
+    resolved = queue.approve(id)
+
+    assert_equal :once, resolved.first.resolution_scope
+    assert_equal :once, resolved.first.scope
+    assert_nil resolved.first.feedback
+    assert_equal :once, queue[id].resolution_scope
+    assert_equal :once, @approved.first.resolution_scope
+  end
+
+  def test_approve_carries_explicit_session_and_project_scopes
+    queue = build_queue
+    session_id = queue.submit(tool_call_id: '1', tool_name: 'bash')
+    project_id = queue.submit(tool_call_id: '2', tool_name: 'bash')
+
+    session_resolved = queue.approve(session_id, scope: :session)
+    project_resolved = queue.approve(project_id, scope: :project)
+
+    assert_equal :session, session_resolved.first.resolution_scope
+    assert_equal :session, @approved[0].resolution_scope
+    assert_equal :project, project_resolved.first.resolution_scope
+    assert_equal :project, @approved[1].resolution_scope
+    assert_equal :approved, queue[session_id].status
+    assert_equal :approved, queue[project_id].status
+  end
+
+  def test_approve_rejects_unknown_scope_without_resolving
+    queue = build_queue
+    id = queue.submit(tool_call_id: '1', tool_name: 'bash')
+
+    error = assert_raises(ArgumentError) { queue.approve(id, scope: :forever) }
+
+    assert_match(/scope/i, error.message)
+    assert_equal :pending, queue[id].status
+    assert_empty @approved
+  end
+
+  def test_approve_all_forwards_scope_to_each_action
+    queue = build_queue
+    ids = Array.new(2) { |i| queue.submit(tool_call_id: "tc-#{i}", tool_name: 'tool') }
+
+    resolved = queue.approve_all(scope: :session)
+
+    assert_equal ids, resolved.map(&:id)
+    assert(resolved.all? { |action| action.resolution_scope == :session })
+    assert_equal %i[session session], @approved.map(&:resolution_scope)
+    assert_empty queue.pending_actions
+  end
+
+  def test_auto_approved_actions_report_once_scope
+    queue = build_queue(auto_approve: { 'read' => true })
+    id = queue.submit(tool_call_id: 'tc-1', tool_name: 'read', auto_approvable: true)
+
+    assert_equal :approved, queue[id].status
+    assert_equal :once, queue[id].resolution_scope
+    assert_equal :once, @approved.first.resolution_scope
+    assert_nil @approved.first.feedback
+  end
+
+  def test_reject_carries_optional_feedback
+    queue = build_queue
+    plain_id = queue.submit(tool_call_id: '1', tool_name: 'bash')
+    noted_id = queue.submit(tool_call_id: '2', tool_name: 'bash')
+
+    plain = queue.reject(plain_id)
+    noted = queue.reject(noted_id, feedback: 'use read instead')
+
+    assert_nil plain.first.feedback
+    assert_nil plain.first.resolution_scope
+    assert_equal 'use read instead', noted.first.feedback
+    assert_equal 'use read instead', @rejected.last.feedback
+    assert_equal :rejected, queue[noted_id].status
+  end
+
+  def test_reject_all_forwards_feedback
+    queue = build_queue
+    ids = Array.new(2) { |i| queue.submit(tool_call_id: "tc-#{i}", tool_name: 'tool') }
+
+    resolved = queue.reject_all(feedback: 'not now')
+
+    assert_equal ids, resolved.map(&:id)
+    assert_equal ['not now', 'not now'], resolved.map(&:feedback)
+    assert_equal ['not now', 'not now'], @rejected.map(&:feedback)
+  end
+
+  def test_pending_actions_have_nil_scope_and_feedback_and_snapshots_stay_pending_only
+    queue = build_queue
+    pending_id = queue.submit(tool_call_id: '1', tool_name: 'bash')
+    decided_id = queue.submit(tool_call_id: '2', tool_name: 'bash')
+
+    assert_nil queue[pending_id].resolution_scope
+    assert_nil queue[pending_id].feedback
+
+    queue.approve(decided_id, scope: :project)
+
+    snapshot = queue.snapshot
+
+    assert_equal [pending_id], snapshot[:pending_actions].map { |entry| entry[:id] }
+    refute snapshot[:pending_actions].any? { |entry| entry.key?(:resolution_scope) }
+    refute snapshot[:pending_actions].any? { |entry| entry.key?(:feedback) }
+  end
+
+  def test_on_approve_callback_keeps_one_argument_shape
+    queue = build_queue
+
+    assert_equal 1, queue.on_approve.arity
+    assert_equal 1, queue.on_reject.arity
+
+    approved_id = queue.submit(tool_call_id: '1', tool_name: 'bash')
+    queue.approve(approved_id, scope: :session)
+    rejected_id = queue.submit(tool_call_id: '2', tool_name: 'bash')
+    queue.reject(rejected_id, feedback: 'nope')
+
+    assert_equal :session, @approved.first.resolution_scope
+    assert_equal 'nope', @rejected.first.feedback
   end
 end
