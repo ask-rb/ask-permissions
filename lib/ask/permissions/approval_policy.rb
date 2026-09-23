@@ -7,9 +7,9 @@ module Ask
       MODES = %i[full_access ask_before_changes read_only].freeze
       SIDE_EFFECT_SCOPES = %i[none session workspace project system external unknown].freeze
 
-      attr_reader :queue, :require_approval, :rules, :tools, :mode
+      attr_reader :queue, :require_approval, :rules, :tools, :mode, :session_grants
 
-      def initialize(queue:, require_approval: nil, rules: nil, tools: nil, mode: nil)
+      def initialize(queue:, require_approval: nil, rules: nil, tools: nil, mode: nil, session_grants: nil)
         raise ArgumentError, "Unknown permission mode: #{mode.inspect}" if mode && !MODES.include?(mode.to_sym)
 
         @queue = queue
@@ -17,6 +17,7 @@ module Ask
         @rules = rules
         @tools = tools
         @mode = mode&.to_sym
+        @session_grants = session_grants
       end
 
       def before_tool_call(tool_call, _context = nil)
@@ -24,18 +25,11 @@ module Ask
         args = tool_call.arguments
 
         rule_decision = rules&.classify(name, args)
-        case rule_decision
-        when :deny
-          return { action: :block, reason: "Denied by permission rules: '#{name}'" }
-        when :ask
-          return enqueue(tool_call, auto_approvable: false)
-        end
+        return { action: :block, reason: "Denied by permission rules: '#{name}'" } if rule_decision == :deny
 
         # A tool's explicit human-confirmation requirement is a hard safety
         # boundary: an ordinary allow rule must not be able to bypass it.
-        if always_ask?(name)
-          return enqueue(tool_call, auto_approvable: false)
-        end
+        return enqueue(tool_call, auto_approvable: false) if always_ask?(name)
 
         if mode == :read_only && side_effect_scope(name) != :none
           return { action: :block, reason: "Read-only mode blocks tools with side effects (#{name})" }
@@ -43,17 +37,13 @@ module Ask
 
         return { action: :proceed } if rule_decision == :allow
 
-        return { action: :proceed } if mode == :full_access
+        # In-session whole-tool grants bypass ordinary ask rules,
+        # approval_required gates, high-risk gates, and ask_before_changes
+        # side-effect prompts. They never bypass deny, always_ask, or
+        # read_only above.
+        return { action: :proceed } if session_granted?(name)
 
-        if mode == :ask_before_changes && side_effect_scope(name) != :none
-          return enqueue(tool_call, auto_approvable: false)
-        end
-
-        return enqueue(tool_call, auto_approvable: false) if elevated_risk?(name)
-
-        return { action: :proceed } unless approval_required?(name)
-
-        enqueue(tool_call, auto_approvable: auto_approvable?(name))
+        fallback_decision(tool_call, name, rule_decision)
       end
 
       def lookup(action_id)
@@ -87,6 +77,25 @@ module Ask
       def always_ask?(name)
         tool = find_tool(name)
         !!(tool && tool.respond_to?(:always_ask?) && tool.always_ask?)
+      end
+
+      def session_granted?(name)
+        grants = session_grants
+        !!(grants && grants.respond_to?(:granted?) && grants.granted?(name))
+      end
+
+      def fallback_decision(tool_call, name, rule_decision)
+        return enqueue(tool_call, auto_approvable: false) if rule_decision == :ask
+        return { action: :proceed } if mode == :full_access
+
+        if mode == :ask_before_changes && side_effect_scope(name) != :none
+          return enqueue(tool_call, auto_approvable: false)
+        end
+
+        return enqueue(tool_call, auto_approvable: false) if elevated_risk?(name)
+        return { action: :proceed } unless approval_required?(name)
+
+        enqueue(tool_call, auto_approvable: auto_approvable?(name))
       end
 
       def elevated_risk?(name)

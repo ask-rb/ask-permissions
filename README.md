@@ -13,6 +13,7 @@ Everything lives under the `Ask::Permissions` namespace:
 | `ApprovalQueue` | Stores pending `Action`s, auto-approves eligible work in order, fires one-argument callbacks. |
 | `Permissions` | Optional mode gate (`nil` by default, or `:ask_before_changes` / `:read_only` / `:full_access`) with sticky approvals per `tool_call_id`. |
 | `PlanModePolicy` | Allows only declared read-only tools and the plan-submission tool while plan mode is active. |
+| `SessionPermissionGrants` | Thread-safe whole-tool grants scoped to the current session, with versioned JSON-safe snapshot/restore for durable resume. |
 
 Tools that expose `always_ask?` cannot be approved by a matching ordinary
 `allow` rule; their calls enter the human approval queue and cannot be
@@ -200,7 +201,8 @@ policy = Ask::Permissions::ApprovalPolicy.new(
   queue: queue,                              # required
   rules: rules,                              # optional
   require_approval: ["bash", /^write_/],     # optional
-  tools: {"fetch" => fetch_tool}             # optional registry
+  tools: {"fetch" => fetch_tool},            # optional registry
+  session_grants: session_grants             # optional SessionPermissionGrants
 )
 ```
 
@@ -224,9 +226,15 @@ are never auto-approved.
 
 Resolution order — the first layer with an opinion wins:
 
-1. **`rules.classify(name, arguments)`** — `:deny` → block with the exact reason `"Denied by permission rules: '<name>'"`, `:allow` → proceed, `:ask` → enqueue with `auto_approvable: false`. An explicit `allow` rule therefore wins over `require_approval`.
-2. **`require_approval` / tool metadata** — if no rule matched, a `require_approval` pattern or a tool whose metadata reports `approval_required?` enqueues as `:pending`; `auto_approvable` comes from the tool's `auto_approvable?`.
-3. **Default** — otherwise the call proceeds. An unconfigured policy allows everything.
+1. **Explicit `deny` rule** — always blocks with the exact reason `"Denied by permission rules: '<name>'"`. Session grants never bypass it.
+2. **Tool `always_ask?`** — always enqueues with `auto_approvable: false` and cannot be bypassed by an `allow` rule, `:full_access`, or a session grant.
+3. **`:read_only` mode** — blocks tools whose side-effect scope is not `:none`. Session grants never bypass it.
+4. **Explicit `allow` rule** — proceeds. An explicit `allow` therefore wins over `require_approval`.
+5. **Session grant** (`session_grants.granted?(name)`) — proceeds, bypassing ordinary `ask` rules, `require_approval` / `approval_required?` metadata, `:high`/`:critical` risk gates, and `:ask_before_changes` side-effect prompts.
+6. **Ordinary `ask` rule** — enqueues with `auto_approvable: false`.
+7. **`:full_access` mode** — proceeds (except `always_ask?` above).
+8. **`require_approval` / tool metadata / risk / `:ask_before_changes`** — enqueues as `:pending`; `auto_approvable` comes from the tool's `auto_approvable?` (risk and `:ask_before_changes` prompts never auto-approve).
+9. **Default** — otherwise the call proceeds. An unconfigured policy allows everything.
 
 `require_approval` accepts `nil`, `:all` (queue every tool), a `String`/`Symbol` (exact name), a `Regexp`, or an `Array` of those (any match).
 
@@ -250,7 +258,33 @@ queue.approve(action.id)                     # fires on_approve
 queue.reject(action.id)                      # fires on_reject
 ```
 
-Readers: `policy.queue`, `policy.rules`, `policy.require_approval`, `policy.tools`.
+Readers: `policy.queue`, `policy.rules`, `policy.require_approval`, `policy.tools`, `policy.session_grants`.
+
+### Session-scoped grants: `SessionPermissionGrants`
+
+Grants whole-tool access for the current session only. They are in-memory, per-instance (sharing one grants object shares grants; separate objects are isolated), and never rewrite project rules:
+
+```ruby
+grants = Ask::Permissions::SessionPermissionGrants.new
+grants.grant("bash")      # Symbol or String; duplicate grants are idempotent
+grants.granted?("bash")   # => true
+grants.revoke("bash")     # => self; unknown tools are a noop
+grants.granted_tools      # => ["bash"] (sorted Strings)
+grants.clear
+
+policy = Ask::Permissions::ApprovalPolicy.new(queue: queue, require_approval: "bash", session_grants: grants)
+policy.before_tool_call(tool_call, context)  # => {action: :proceed} while granted
+```
+
+Grants bypass ordinary `ask` rules, `require_approval` / `approval_required?`, high-risk prompts, and `:ask_before_changes` side-effect prompts. They never bypass an explicit `deny`, a tool's `always_ask?`, or `:read_only` mode.
+
+For durable resume, persist `grants.snapshot` (`{version: 1, granted_tools: [...]}`) alongside session state and restore it later. Snapshots survive a JSON round-trip (symbol/string keys both accepted); invalid versions, non-Array payloads, or blank/non-String entries raise `ArgumentError`:
+
+```ruby
+snapshot = grants.snapshot
+restored = Ask::Permissions::SessionPermissionGrants.from_snapshot(JSON.parse(JSON.generate(snapshot)))
+restored.granted?("bash")  # => true
+```
 
 ### Auto-approval through the policy
 
