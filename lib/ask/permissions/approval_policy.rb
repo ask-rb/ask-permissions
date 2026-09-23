@@ -7,9 +7,10 @@ module Ask
       MODES = %i[full_access ask_before_changes read_only].freeze
       SIDE_EFFECT_SCOPES = %i[none session workspace project system external unknown].freeze
 
-      attr_reader :queue, :require_approval, :rules, :tools, :mode, :session_grants
+      attr_reader :queue, :require_approval, :rules, :tools, :mode, :session_grants, :project_grants
 
-      def initialize(queue:, require_approval: nil, rules: nil, tools: nil, mode: nil, session_grants: nil)
+      def initialize(queue:, require_approval: nil, rules: nil, tools: nil, mode: nil, session_grants: nil,
+        project_grants: nil)
         raise ArgumentError, "Unknown permission mode: #{mode.inspect}" if mode && !MODES.include?(mode.to_sym)
 
         @queue = queue
@@ -18,6 +19,7 @@ module Ask
         @tools = tools
         @mode = mode&.to_sym
         @session_grants = session_grants
+        @project_grants = project_grants
       end
 
       def before_tool_call(tool_call, _context = nil)
@@ -37,11 +39,11 @@ module Ask
 
         return { action: :proceed } if rule_decision == :allow
 
-        # In-session whole-tool grants bypass ordinary ask rules,
+        # In-session and project whole-tool grants bypass ordinary ask rules,
         # approval_required gates, high-risk gates, and ask_before_changes
         # side-effect prompts. They never bypass deny, always_ask, or
         # read_only above.
-        return { action: :proceed } if session_granted?(name)
+        return { action: :proceed } if granted?(name)
 
         fallback_decision(tool_call, name, rule_decision)
       end
@@ -82,6 +84,15 @@ module Ask
       def session_granted?(name)
         grants = session_grants
         !!(grants && grants.respond_to?(:granted?) && grants.granted?(name))
+      end
+
+      def project_granted?(name)
+        grants = project_grants
+        !!(grants && grants.respond_to?(:granted?) && grants.granted?(name))
+      end
+
+      def granted?(name)
+        session_granted?(name) || project_granted?(name)
       end
 
       def fallback_decision(tool_call, name, rule_decision)

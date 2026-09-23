@@ -202,7 +202,8 @@ policy = Ask::Permissions::ApprovalPolicy.new(
   rules: rules,                              # optional
   require_approval: ["bash", /^write_/],     # optional
   tools: {"fetch" => fetch_tool},            # optional registry
-  session_grants: session_grants             # optional SessionPermissionGrants
+  session_grants: session_grants,            # optional SessionPermissionGrants
+  project_grants: project_grants             # optional host-owned collaborator responding to granted?(tool_name)
 )
 ```
 
@@ -226,11 +227,11 @@ are never auto-approved.
 
 Resolution order — the first layer with an opinion wins:
 
-1. **Explicit `deny` rule** — always blocks with the exact reason `"Denied by permission rules: '<name>'"`. Session grants never bypass it.
-2. **Tool `always_ask?`** — always enqueues with `auto_approvable: false` and cannot be bypassed by an `allow` rule, `:full_access`, or a session grant.
-3. **`:read_only` mode** — blocks tools whose side-effect scope is not `:none`. Session grants never bypass it.
+1. **Explicit `deny` rule** — always blocks with the exact reason `"Denied by permission rules: '<name>'"`. Neither session nor project grants bypass it.
+2. **Tool `always_ask?`** — always enqueues with `auto_approvable: false` and cannot be bypassed by an `allow` rule, `:full_access`, or either grants collaborator.
+3. **`:read_only` mode** — blocks tools whose side-effect scope is not `:none`. Neither session nor project grants bypass it.
 4. **Explicit `allow` rule** — proceeds. An explicit `allow` therefore wins over `require_approval`.
-5. **Session grant** (`session_grants.granted?(name)`) — proceeds, bypassing ordinary `ask` rules, `require_approval` / `approval_required?` metadata, `:high`/`:critical` risk gates, and `:ask_before_changes` side-effect prompts.
+5. **Session or project grant** (`session_grants.granted?(name)` or `project_grants.granted?(name)`) — proceeds, bypassing ordinary `ask` rules, `require_approval` / `approval_required?` metadata, `:high`/`:critical` risk gates, and `:ask_before_changes` side-effect prompts.
 6. **Ordinary `ask` rule** — enqueues with `auto_approvable: false`.
 7. **`:full_access` mode** — proceeds (except `always_ask?` above).
 8. **`require_approval` / tool metadata / risk / `:ask_before_changes`** — enqueues as `:pending`; `auto_approvable` comes from the tool's `auto_approvable?` (risk and `:ask_before_changes` prompts never auto-approve).
@@ -258,7 +259,7 @@ queue.approve(action.id)                     # fires on_approve
 queue.reject(action.id)                      # fires on_reject
 ```
 
-Readers: `policy.queue`, `policy.rules`, `policy.require_approval`, `policy.tools`, `policy.session_grants`.
+Readers: `policy.queue`, `policy.rules`, `policy.require_approval`, `policy.tools`, `policy.session_grants`, `policy.project_grants`.
 
 ### Session-scoped grants: `SessionPermissionGrants`
 
@@ -277,6 +278,21 @@ policy.before_tool_call(tool_call, context)  # => {action: :proceed} while grant
 ```
 
 Grants bypass ordinary `ask` rules, `require_approval` / `approval_required?`, high-risk prompts, and `:ask_before_changes` side-effect prompts. They never bypass an explicit `deny`, a tool's `always_ask?`, or `:read_only` mode.
+
+### Project-scoped grants: `project_grants`
+
+`ApprovalPolicy` also accepts an optional host-owned `project_grants:` collaborator. It only needs to respond to `granted?(tool_name)` — the host owns storage and persistence, so this gem ships no project store:
+
+```ruby
+policy = Ask::Permissions::ApprovalPolicy.new(
+  queue: queue,
+  require_approval: "bash",
+  session_grants: session_grants,   # optional, nil by default
+  project_grants: project_grants    # optional, nil by default
+)
+```
+
+A matching grant from **either** collaborator bypasses the same ordinary ask gates listed above; neither can bypass an explicit `deny`, `always_ask?`, or `:read_only`. When either (or both) is `nil`, existing behavior is preserved. `SessionPermissionGrants` stays isolated and session-owned — sharing one instance shares session grants, separate instances do not, and project grants never mutate session grants or project rules.
 
 For durable resume, persist `grants.snapshot` (`{version: 1, granted_tools: [...]}`) alongside session state and restore it later. Snapshots survive a JSON round-trip (symbol/string keys both accepted); invalid versions, non-Array payloads, or blank/non-String entries raise `ArgumentError`:
 
