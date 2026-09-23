@@ -10,6 +10,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 
 - Add a reusable plan-mode gate and make tool-declared human approval requirements override ordinary allow rules.
+- Add JSON-safe pending approval snapshots for hosts that resume sessions after a restart.
 
 ## [0.1.0] - 2026-09-23
 

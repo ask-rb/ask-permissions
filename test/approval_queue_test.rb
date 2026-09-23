@@ -560,4 +560,43 @@ class ApprovalQueueTest < Minitest::Test
     assert_equal [[id, :approved, false]], observations
     assert_equal returned.first, queue[id]
   end
+
+  def test_pending_actions_can_be_snapshotted_and_restored_without_replaying_submission
+    original = build_queue
+    original.submit(
+      tool_call_id: 'tool-call-9',
+      tool_name: 'write',
+      args: { 'path' => '/tmp/file' },
+      message: 'Confirm write'
+    )
+    snapshot = original.snapshot
+    restored_submissions = []
+    restored_approvals = []
+    restored = build_queue(
+      on_submit: ->(action) { restored_submissions << action },
+      on_approve: ->(action) { restored_approvals << action }
+    )
+
+    assert_equal 1, restored.restore_pending(snapshot)
+    assert_empty restored_submissions
+    action = restored.pending_actions.fetch(0)
+    assert_equal 1, action.id
+    assert_equal 'tool-call-9', action.tool_call_id
+    assert_equal({ 'path' => '/tmp/file' }, action.args)
+    assert_equal 'Confirm write', action.message
+
+    resolved = restored.approve(action.id)
+    assert_equal :applying, restored_approvals.fetch(0).status
+    assert_equal :approved, resolved.fetch(0).status
+  end
+
+  def test_restore_pending_rejects_unsupported_snapshot_versions
+    queue = build_queue
+
+    error = assert_raises(ArgumentError) do
+      queue.restore_pending('version' => 2, 'pending_actions' => [])
+    end
+
+    assert_match(/version/i, error.message)
+  end
 end

@@ -18,6 +18,11 @@ Tools that expose `always_ask?` cannot be approved by a matching ordinary
 `allow` rule; their calls enter the human approval queue and cannot be
 auto-approved.
 
+`ApprovalQueue#snapshot` and `#restore_pending` let a session host persist
+pending approvals alongside its durable session state. Restoring does not
+re-emit submission events or auto-approve work; the host remains responsible
+for replaying its event log and reconnecting the restored queue to its session.
+
 ## Installation
 
 ```ruby

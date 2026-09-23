@@ -73,6 +73,69 @@ module Ask
         @mutex.synchronize { @actions.values.select(&:pending?) }
       end
 
+      # A JSON-safe snapshot of pending approvals for a durable session store.
+      # Resolved actions are deliberately omitted so a restored approval can
+      # never execute twice after a restart.
+      def snapshot
+        @mutex.synchronize do
+          {
+            version: 1,
+            next_id: @next_id,
+            pending_actions: @actions.values.select(&:pending?).map do |action|
+              {
+                id: action.id,
+                tool_call_id: action.tool_call_id,
+                tool_name: action.tool_name,
+                args: action.args,
+                auto_approvable: action.auto_approvable?,
+                message: action.message
+              }
+            end
+          }
+        end
+      end
+
+      # Reconstitutes pending actions without emitting new submission events
+      # or draining auto-approvals. The host owns replaying its durable event
+      # log; this restores only the actionable queue state.
+      def restore_pending(snapshot)
+        version = snapshot_value(snapshot, :version)
+        raise ArgumentError, "Unsupported approval snapshot version: #{version.inspect}" unless version == 1
+
+        entries = snapshot_value(snapshot, :pending_actions)
+        raise ArgumentError, "Approval snapshot pending_actions must be an Array" unless entries.is_a?(Array)
+
+        restored = entries.map do |entry|
+          id = snapshot_value(entry, :id)
+          tool_name = snapshot_value(entry, :tool_name)
+          raise ArgumentError, "Approval snapshot action id must be a positive Integer" unless id.is_a?(Integer) && id.positive?
+          raise ArgumentError, "Approval snapshot tool_name must be a String" unless tool_name.is_a?(String)
+
+          Action.new(
+            id: id,
+            tool_call_id: snapshot_value(entry, :tool_call_id),
+            tool_name: tool_name,
+            args: snapshot_value(entry, :args) || {},
+            auto_approvable: snapshot_value(entry, :auto_approvable) == true,
+            status: :pending,
+            submitted_at: @clock.call,
+            message: snapshot_value(entry, :message)
+          )
+        end
+        ids = restored.map(&:id)
+        raise ArgumentError, "Approval snapshot contains duplicate action ids" unless ids.uniq == ids
+
+        @mutex.synchronize do
+          raise ArgumentError, "Cannot restore approvals into a non-empty queue" unless @actions.empty?
+
+          restored.each { |action| @actions[action.id] = action }
+          requested_next_id = snapshot_value(snapshot, :next_id)
+          @next_id = [requested_next_id.to_i, ids.max.to_i].max
+        end
+
+        restored.size
+      end
+
       def pending?(id)
         @mutex.synchronize { @actions[id]&.pending? || false }
       end
@@ -120,6 +183,12 @@ module Ask
       end
 
       private
+
+      def snapshot_value(hash, key)
+        raise ArgumentError, "Approval snapshot values must be Hashes" unless hash.is_a?(Hash)
+
+        hash.key?(key) ? hash[key] : hash[key.to_s]
+      end
 
       def apply(action)
         resolve(action.id, @on_approve, :approved)
